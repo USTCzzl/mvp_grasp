@@ -28,7 +28,9 @@ class Logger:
     def __init__(self, output_desc='run', output_dir='~'):
         dt = datetime.datetime.now().strftime('%m%d_%H%M%S')
         self.out_file = os.path.join(output_dir, '%s_%s.txt' % (dt, output_desc))
-
+        dirname = os.path.dirname(self.out_file)
+        if not os.path.exists(dirname):
+            os.makedirs(dirname)
     def write_line(self, l):
         with open(self.out_file, 'a') as f:
             f.write(l)
@@ -76,7 +78,7 @@ class Run:
         self.t0 = 0
         self.t1 = 0
         self.success = False
-        self.qualtiy = None
+        self.quality = None
         self.entropy = None
 
     def start(self):
@@ -167,7 +169,7 @@ class BaseGraspController(object):
         self.cs = ControlSwitcher({'moveit': 'position_joint_trajectory_controller',
                                    'velocity': 'cartesian_velocity_node_controller'})
         self.cs.switch_controller('moveit')
-        self.pc = PandaCommander(group_name='panda_arm_hand')
+        self.pc = PandaCommander(group_name='panda_arm')
 
         self.robot_state = None
         self.ROBOT_ERROR_DETECTED = False
@@ -246,7 +248,42 @@ class BaseGraspController(object):
         self.update_pub.publish(Empty())
 
     def __velo_control_loop(self):
-        raise NotImplementedError()
+        """
+        Perform velocity control using the MVP controller.
+        """
+        ctr = 0
+        r = rospy.Rate(self.curr_velocity_publish_rate)
+        while not rospy.is_shutdown():
+            if self.ROBOT_ERROR_DETECTED or self.BAD_UPDATE:
+                return False
+
+            # End effector Z height
+            if self.robot_state.O_T_EE[-2] < 0.175:
+                # self.stop()
+                rospy.sleep(0.1)
+                return True
+
+            ctr += 1
+            if ctr >= self.curr_velocity_publish_rate/self.update_rate:
+                ctr = 0
+                self.__trigger_update()
+
+            # Cartesian Contact
+            if any(self.robot_state.cartesian_contact):
+                self.stop()
+                rospy.logerr('Detected cartesian contact during velocity control loop.')
+                return False
+
+            v = Twist()
+            v.linear.x = self.curr_velo.linear.x * self.max_velo
+            v.linear.y = self.curr_velo.linear.y * self.max_velo
+            v.linear.z = self.curr_velo.linear.z * self.max_velo
+            v.angular = self.curr_velo.angular
+
+            self.curr_velo_pub.publish(v)
+            r.sleep()
+
+        return not rospy.is_shutdown()
 
     def __execute_best_grasp(self):
             self.cs.switch_controller('moveit')
@@ -301,12 +338,14 @@ class BaseGraspController(object):
         while not rospy.is_shutdown():
             self.cs.switch_controller('moveit')
             self.pc.goto_named_pose('grip_ready', velocity=0.25)
+            print("grip_ready sucess")
             start_pose = list(self.pregrasp_pose)
             start_pose[0] += np.random.randn() * 0.05
             start_pose[1] += np.random.randn() * 0.05
             self.pc.goto_pose(start_pose, velocity=0.25)
+            print("goto_pose sucess")
             self.pc.set_gripper(0.1)
-
+            print("gripper sucess")
             self.cs.switch_controller('velocity')
 
             self.entropy_reset_srv.call()
